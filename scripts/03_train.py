@@ -225,12 +225,25 @@ def main():
             except StopIteration:
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
-            # TODO: add noise to latents for diffusion training
+
+            latents = batch["latents"].to(device)
+            text_emb = batch["text_emb"].to(device)
+            B = latents.shape[0]
+
+            # Compute latent spatial/temporal dims for transformer
+            _, _, lt, lh, lw = latents.shape
+
             metrics = trainer.train_step_self_supervised(
                 {
-                    "noisy_latents": batch["latents"].to(device),
-                    "timesteps": torch.randint(0, 1000, (args.batch_size,), device=device),
-                    "text_embeddings": batch["text_emb"].to(device),
+                    "noisy_latents": latents,
+                    "timesteps": torch.randint(0, 1000, (B,), device=device),
+                    "text_embeddings": text_emb,
+                    "encoder_attention_mask": torch.ones(
+                        B, text_emb.shape[1], device=device, dtype=text_emb.dtype,
+                    ),
+                    "num_frames": lt,
+                    "height": lh,
+                    "width": lw,
                 },
                 global_step,
             )

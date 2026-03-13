@@ -12,6 +12,16 @@ Two training modes:
    match teacher outputs. This is how 1.58-bit FLUX works.
 2. Data-driven distillation: use actual video data for training signal.
    Stronger but requires dataset preparation.
+
+LTX-Video transformer forward signature:
+    forward(
+        hidden_states,           # (B, seq_len, inner_dim) — patchified latents
+        encoder_hidden_states,   # (B, text_seq_len, cross_attn_dim)
+        timestep,                # (B,) LongTensor
+        encoder_attention_mask,  # (B, text_seq_len)
+        num_frames, height, width,  # ints for rotary embeddings
+        ...
+    ) -> Transformer2DModelOutput(sample=...)
 """
 
 import torch
@@ -22,12 +32,33 @@ from typing import Optional
 import math
 
 
+def _call_transformer(model, hidden_states, encoder_hidden_states, timestep,
+                      encoder_attention_mask, num_frames, height, width):
+    """Call LTX-Video transformer with the correct signature.
+
+    The transformer expects patchified hidden_states (B, seq_len, dim).
+    It handles patchifying internally via self.proj_in(), so we pass
+    the raw latent tensor and let it handle the rest.
+    """
+    out = model(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        encoder_attention_mask=encoder_attention_mask,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        return_dict=True,
+    )
+    return out.sample if hasattr(out, "sample") else out
+
+
 class DistillationTrainer:
     """Trains a 1.58-bit student DiT to match a frozen FP16 teacher.
 
     Args:
-        teacher: frozen FP16 video DiT model
-        student: 1.58-bit (BitLinear) video DiT model
+        teacher: frozen FP16 video DiT model (LTXVideoTransformer3DModel)
+        student: 1.58-bit (BitLinear) video DiT model (TernaryDiTWrapper)
         optimizer: optimizer for student parameters
         scheduler: optional LR scheduler
         device: training device
@@ -89,47 +120,46 @@ class DistillationTrainer:
         Follows 1.58-bit FLUX approach:
         1. Sample random noise in latent space
         2. Sample random diffusion timestep
-        3. Teacher predicts denoised output
-        4. Student must match teacher's prediction
+        3. Teacher predicts denoised output → student must match
 
-        Args:
-            batch_size: number of samples
-            num_frames: video frames (will be compressed by VAE)
-            height: pixel height (will be compressed by VAE)
-            width: pixel width (will be compressed by VAE)
-            text_embeddings: precomputed text encoder outputs
-            vae_latent_channels: latent channels from VAE
-            spatial_compression: VAE spatial compression ratio
-            temporal_compression: VAE temporal compression ratio
-
-        Returns:
-            dict with noisy_latents, timesteps, text_embeddings
+        LTX-Video VAE compression: 32x32 spatial, 8x temporal.
+        Latent channels: 128.
         """
-        # Compute latent dimensions
+        # Compute latent dimensions after VAE compression
         latent_h = height // spatial_compression
         latent_w = width // spatial_compression
         latent_t = max(1, num_frames // temporal_compression)
 
-        # Sample random latents (as if from VAE encoding)
+        # Sample random latents — shape matches what LTX-Video transformer expects
+        # The transformer's proj_in handles (B, C, T, H, W) -> (B, seq, dim)
         noisy_latents = torch.randn(
             batch_size, vae_latent_channels, latent_t, latent_h, latent_w,
-            device=self.device, dtype=torch.float16,
+            device=self.device, dtype=torch.bfloat16,
         )
 
-        # Sample timesteps with bias toward high-noise (where quantization error is worst)
-        # Using Beta distribution to focus on high timesteps (from BitsFusion insight)
+        # Sample timesteps with bias toward high-noise (from BitsFusion)
         beta_dist = torch.distributions.Beta(3.0, 1.0)
         t_normalized = beta_dist.sample((batch_size,)).to(self.device)
         timesteps = (t_normalized * 1000).long()
 
         # Select random text embeddings from the pool
         idx = torch.randint(0, text_embeddings.shape[0], (batch_size,))
-        batch_text = text_embeddings[idx].to(self.device)
+        batch_text = text_embeddings[idx].to(device=self.device, dtype=torch.bfloat16)
+
+        # Attention mask: all ones (no masking) for the text sequence
+        encoder_attention_mask = torch.ones(
+            batch_size, batch_text.shape[1],
+            device=self.device, dtype=torch.bfloat16,
+        )
 
         return {
             "noisy_latents": noisy_latents,
             "timesteps": timesteps,
             "text_embeddings": batch_text,
+            "encoder_attention_mask": encoder_attention_mask,
+            "num_frames": latent_t,
+            "height": latent_h,
+            "width": latent_w,
         }
 
     def train_step_self_supervised(
@@ -145,29 +175,23 @@ class DistillationTrainer:
         noisy_latents = batch["noisy_latents"]
         timesteps = batch["timesteps"]
         text_embeddings = batch["text_embeddings"]
+        encoder_attention_mask = batch["encoder_attention_mask"]
+        num_frames = batch["num_frames"]
+        height = batch["height"]
+        width = batch["width"]
 
         # Teacher forward (no grad)
         with torch.no_grad():
-            teacher_out = self.teacher(
-                hidden_states=noisy_latents,
-                encoder_hidden_states=text_embeddings,
-                timestep=timesteps,
+            teacher_pred = _call_transformer(
+                self.teacher, noisy_latents, text_embeddings, timesteps,
+                encoder_attention_mask, num_frames, height, width,
             )
-            if hasattr(teacher_out, "sample"):
-                teacher_pred = teacher_out.sample
-            else:
-                teacher_pred = teacher_out
 
         # Student forward
-        student_out = self.student(
-            hidden_states=noisy_latents,
-            encoder_hidden_states=text_embeddings,
-            timestep=timesteps,
+        student_pred = _call_transformer(
+            self.student, noisy_latents, text_embeddings, timesteps,
+            encoder_attention_mask, num_frames, height, width,
         )
-        if hasattr(student_out, "sample"):
-            student_pred = student_out.sample
-        else:
-            student_pred = student_out
 
         # Distillation loss
         loss = self.compute_distillation_loss(student_pred, teacher_pred)
@@ -197,6 +221,10 @@ class DistillationTrainer:
         noise: torch.Tensor,
         timesteps: torch.Tensor,
         text_embeddings: torch.Tensor,
+        encoder_attention_mask: torch.Tensor,
+        num_frames: int,
+        height: int,
+        width: int,
         step: int,
     ) -> dict:
         """Training step using actual video data.
@@ -208,20 +236,16 @@ class DistillationTrainer:
         """
         # Teacher forward
         with torch.no_grad():
-            teacher_out = self.teacher(
-                hidden_states=noisy_latents,
-                encoder_hidden_states=text_embeddings,
-                timestep=timesteps,
+            teacher_pred = _call_transformer(
+                self.teacher, noisy_latents, text_embeddings, timesteps,
+                encoder_attention_mask, num_frames, height, width,
             )
-            teacher_pred = teacher_out.sample if hasattr(teacher_out, "sample") else teacher_out
 
         # Student forward
-        student_out = self.student(
-            hidden_states=noisy_latents,
-            encoder_hidden_states=text_embeddings,
-            timestep=timesteps,
+        student_pred = _call_transformer(
+            self.student, noisy_latents, text_embeddings, timesteps,
+            encoder_attention_mask, num_frames, height, width,
         )
-        student_pred = student_out.sample if hasattr(student_out, "sample") else student_out
 
         # Combined loss: noise prediction + distillation
         noise_loss = F.mse_loss(student_pred, noise)
