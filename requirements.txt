@@ -1,0 +1,24 @@
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+accelerate>=0.25.0
+diffusers>=0.28.0
+transformers>=4.36.0
+safetensors>=0.4.0
+
+# Training
+deepspeed>=0.12.0
+wandb>=0.16.0
+
+# Data
+video2dataset>=1.1.0
+webdataset>=0.2.0
+decord>=0.6.0
+
+# Evaluation
+clip-benchmark>=1.4.0
+
+# Utils
+pyyaml>=6.0
+tqdm>=4.65.0
+einops>=0.7.0

@@ -1,0 +1,45 @@
+# Data
+data/
+datasets/
+*.tar
+*.wds
+
+# Checkpoints
+checkpoints/
+*.pt
+*.safetensors
+*.bin
+!requirements.txt
+
+# Results
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.venv/
+venv/
+
+# Wandb
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/

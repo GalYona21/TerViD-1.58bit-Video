@@ -1,0 +1,40 @@
+# Data-driven training config (uses video dataset)
+# Stronger training signal but requires dataset preparation
+#
+# Prerequisites:
+# 1. Run scripts/01_download_videos.sh
+# 2. Run scripts/02_prepare_latents.py
+
+model:
+  model_id: "Lightricks/LTX-Video"
+  strategy: "full"  # full | spatial_only | ffn_only
+  quantize_activations: false
+
+data:
+  mode: "data_driven"
+  data_dir: "data/latents"
+  num_frames: 16
+  height: 256
+  width: 256
+
+training:
+  num_steps: 100000
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  lr: 5e-4
+  lr_min: 1e-4
+  weight_decay: 1e-4
+  warmup_steps: 2000
+  max_grad_norm: 1.0
+  loss_type: "mse"
+  # Distillation weight (0=noise only, 1=distill only, 0.5=balanced)
+  distillation_alpha: 0.5
+
+memory:
+  gradient_checkpointing: true
+  mixed_precision: "fp16"
+
+checkpointing:
+  output_dir: "checkpoints/datadriven"
+  save_every: 5000
+  log_every: 100

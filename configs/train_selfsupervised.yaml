@@ -1,0 +1,40 @@
+# Self-supervised training config (no video data needed)
+# Based on 1.58-bit FLUX approach
+#
+# This is the easiest starting point:
+# - Only needs a list of text prompts
+# - Teacher generates targets from noise + prompts
+# - Student learns to match teacher outputs
+
+model:
+  model_id: "Lightricks/LTX-Video"
+  strategy: "full"  # full | spatial_only | ffn_only
+  quantize_activations: false
+
+data:
+  mode: "self_supervised"
+  prompts_file: "data/prompts.txt"
+  # Video dimensions for generated noise (small for PoC)
+  num_frames: 16
+  height: 256
+  width: 256
+
+training:
+  num_steps: 50000
+  batch_size: 1
+  gradient_accumulation_steps: 8  # effective batch = 8
+  lr: 5e-4           # higher LR for ternary (from TerDiT)
+  lr_min: 1e-4       # cosine decay target
+  weight_decay: 1e-4
+  warmup_steps: 1000
+  max_grad_norm: 1.0
+  loss_type: "mse"
+
+memory:
+  gradient_checkpointing: true
+  mixed_precision: "fp16"
+
+checkpointing:
+  output_dir: "checkpoints/selfsupervised"
+  save_every: 5000
+  log_every: 100
