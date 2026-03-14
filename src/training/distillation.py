@@ -126,6 +126,7 @@ class DistillationTrainer:
         self.grad_accum_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self.loss_type = loss_type
+        self.dtype = next(self.teacher.parameters()).dtype
 
         # Freeze teacher
         for param in self.teacher.parameters():
@@ -175,7 +176,7 @@ class DistillationTrainer:
         # The transformer's proj_in handles (B, C, T, H, W) -> (B, seq, dim)
         noisy_latents = torch.randn(
             batch_size, vae_latent_channels, latent_t, latent_h, latent_w,
-            device=self.device, dtype=torch.bfloat16,
+            device=self.device, dtype=self.dtype,
         )
 
         # Sample timesteps with bias toward high-noise (from BitsFusion)
@@ -185,12 +186,12 @@ class DistillationTrainer:
 
         # Select random text embeddings from the pool
         idx = torch.randint(0, text_embeddings.shape[0], (batch_size,))
-        batch_text = text_embeddings[idx].to(device=self.device, dtype=torch.bfloat16)
+        batch_text = text_embeddings[idx].to(device=self.device, dtype=self.dtype)
 
         # Attention mask: all ones (no masking) for the text sequence
         encoder_attention_mask = torch.ones(
             batch_size, batch_text.shape[1],
-            device=self.device, dtype=torch.bfloat16,
+            device=self.device, dtype=self.dtype,
         )
 
         return {
