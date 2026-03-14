@@ -32,14 +32,51 @@ from typing import Optional
 import math
 
 
-def _call_transformer(model, hidden_states, encoder_hidden_states, timestep,
-                      encoder_attention_mask, num_frames, height, width):
-    """Call LTX-Video transformer with the correct signature.
+def _pack_latents(latents: torch.Tensor, patch_size: int = 1, patch_size_t: int = 1) -> torch.Tensor:
+    """Convert (B, C, T, H, W) latents to (B, seq_len, patch_channels) for the transformer.
 
-    The transformer expects patchified hidden_states (B, seq_len, dim).
-    It handles patchifying internally via self.proj_in(), so we pass
-    the raw latent tensor and let it handle the rest.
+    This replicates LTXPipeline._pack_latents from diffusers.
+    With patch_size=1 and patch_size_t=1, this is simply a reshape:
+        (B, C, T, H, W) -> (B, T*H*W, C)
     """
+    batch_size, num_channels, num_frames, height, width = latents.shape
+    post_patch_num_frames = num_frames // patch_size_t
+    post_patch_height = height // patch_size
+    post_patch_width = width // patch_size
+    latents = latents.reshape(
+        batch_size, -1,
+        post_patch_num_frames, patch_size_t,
+        post_patch_height, patch_size,
+        post_patch_width, patch_size,
+    )
+    latents = latents.permute(0, 2, 4, 6, 1, 3, 5, 7).flatten(4, 7).flatten(1, 3)
+    return latents
+
+
+def _unpack_latents(
+    latents: torch.Tensor, num_frames: int, height: int, width: int,
+    patch_size: int = 1, patch_size_t: int = 1,
+) -> torch.Tensor:
+    """Convert (B, seq_len, patch_channels) back to (B, C, T, H, W).
+
+    This replicates LTXPipeline._unpack_latents from diffusers.
+    """
+    batch_size = latents.size(0)
+    latents = latents.reshape(batch_size, num_frames, height, width, -1, patch_size_t, patch_size, patch_size)
+    latents = latents.permute(0, 4, 1, 5, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(2, 3)
+    return latents
+
+
+def _call_transformer(model, hidden_states_5d, encoder_hidden_states, timestep,
+                      encoder_attention_mask, num_frames, height, width):
+    """Call LTX-Video transformer with correct input format.
+
+    The transformer expects PACKED latents: (B, seq_len, C), not (B, C, T, H, W).
+    The pipeline handles this packing; we replicate it here.
+    """
+    # Pack: (B, C, T, H, W) -> (B, T*H*W, C)
+    hidden_states = _pack_latents(hidden_states_5d)
+
     out = model(
         hidden_states=hidden_states,
         encoder_hidden_states=encoder_hidden_states,
@@ -50,7 +87,11 @@ def _call_transformer(model, hidden_states, encoder_hidden_states, timestep,
         width=width,
         return_dict=True,
     )
-    return out.sample if hasattr(out, "sample") else out
+    output = out.sample if hasattr(out, "sample") else out
+
+    # Unpack back: (B, T*H*W, C) -> (B, C, T, H, W)
+    output = _unpack_latents(output, num_frames, height, width)
+    return output
 
 
 class DistillationTrainer:
