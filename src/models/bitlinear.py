@@ -73,6 +73,19 @@ def activation_quant_8bit(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return x_quant, scale
 
 
+class _RMSNorm(nn.Module):
+    """RMS normalization (compatible with PyTorch < 2.4 which lacks nn.RMSNorm)."""
+
+    def __init__(self, dim: int, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return x / rms
+
+
 class BitLinear(nn.Module):
     """1.58-bit linear layer with ternary weights and 8-bit activations.
 
@@ -112,7 +125,7 @@ class BitLinear(nn.Module):
             self.register_parameter("bias", None)
 
         # RMS norm for activation stabilization (from TerDiT)
-        self.rms_norm = nn.RMSNorm(in_features, elementwise_affine=False)
+        self.rms_norm = _RMSNorm(in_features)
 
         self._init_weights()
 
